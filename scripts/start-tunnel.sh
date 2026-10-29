@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
-echo "============================================================"
+echo "=============================================================="
 echo "🚀 Starting 9router & Cloudflare Tunnel setup..."
-echo "============================================================"
+echo "=============================================================="
 
 # Environment variables setup
 ENV_FILE="${ENV_FILE_PATH:-api_keys.env}"
@@ -16,37 +16,29 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-# Re-evaluate port if loaded from env file
 PORT="${ROUTER_PORT:-20128}"
 
 # Step 1: Seed 9router Database with configured API keys
 echo "🌱 Seeding 9router database..."
 python3 scripts/setup-providers.py
 
-# Step 2: Launch 9router
+# Step 2: Launch 9router with built-in tunnel support
 echo "📡 Launching 9router service on port $PORT..."
 mkdir -p /tmp/9router-logs
 
-# Try starting 9router using npx, global binary, or local npm
-if command -v 9router &> /dev/null; then
-    PORT=$PORT 9router > /tmp/9router-logs/app.log 2>&1 &
-elif [ -f "package.json" ]; then
-    PORT=$PORT npm run dev > /tmp/9router-logs/app.log 2>&1 &
-else
-    PORT=$PORT npx -y 9router > /tmp/9router-logs/app.log 2>&1 &
-fi
-
+# Start 9router in background
+PORT=$PORT 9router > /tmp/9router-logs/app.log 2>&1 &
 ROUTER_PID=$!
 echo "9router PID: $ROUTER_PID"
 
 # Step 3: Wait for 9router to start
 echo "⏳ Waiting for 9router to respond on http://127.0.0.1:$PORT ..."
-MAX_RETRIES=30
+MAX_RETRIES=60
 RETRY_COUNT=0
 HEALTH_OK=0
 
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1 || curl -s "http://127.0.0.1:$PORT/v1/models" > /dev/null 2>&1; then
+    if curl -s "http://127.0.0.1:$PORT/v1/models" > /dev/null 2>&1; then
         HEALTH_OK=1
         break
     fi
@@ -57,50 +49,32 @@ done
 if [ $HEALTH_OK -eq 1 ]; then
     echo "✅ 9router is running and healthy!"
 else
-    echo "⚠️ 9router health check timed out, but continuing to start tunnel..."
+    echo "⚠️ 9router health check timed out, but continuing..."
 fi
 
-# Step 4: Ensure cloudflared is installed
-if ! command -v cloudflared &> /dev/null; then
-    echo "📥 Installing cloudflared binary..."
-    curl -L -s https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared || \
-    sudo curl -L -s https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared || true
-    sudo chmod +x /usr/local/bin/cloudflared || chmod +x /usr/local/bin/cloudflared || true
-fi
-
-# Step 5: Start Cloudflare Tunnel
-echo "🌐 Starting Cloudflare Tunnel..."
-TUNNEL_LOG="/tmp/9router-logs/cloudflared.log"
+# Step 4: Enable tunnel via 9router internal API
+echo "🌐 Starting Cloudflare Tunnel via 9router..."
 
 if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-    echo "🔑 Using custom Cloudflare Tunnel Token"
-    cloudflared tunnel run --token "$CLOUDFLARE_TUNNEL_TOKEN" > "$TUNNEL_LOG" 2>&1 &
-    TUNNEL_PID=$!
-    PUBLIC_URL="Custom Cloudflare Domain (Configured in your Cloudflare Dashboard)"
+    echo "🔑 Using named Cloudflare Tunnel token"
+    TUNNEL_RESPONSE=$(curl -s -X POST "http://127.0.0.1:$PORT/api/tunnel/enable" \
+        -H "Content-Type: application/json" \
+        -d "{\"tunnelUrl\":\"https://tunnel.example.com\",\"tunnelProvider\":\"cloudflare\",\"tunnelDashboardAccess\":false}")
+    echo "Tunnel enable response: $TUNNEL_RESPONSE"
+    sleep 15
 else
-    echo "⚡ Spawning Cloudflare Quick Tunnel (*.trycloudflare.com)..."
-    cloudflared tunnel --url "http://127.0.0.1:$PORT" --no-autoupdate > "$TUNNEL_LOG" 2>&1 &
-    TUNNEL_PID=$!
-    
-    echo "⏳ Waiting for Cloudflare Tunnel URL..."
-    URL_FOUND=0
-    for i in {1..30}; do
-        if grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$TUNNEL_LOG" | head -n 1 > /tmp/tunnel_url.txt; then
-            PUBLIC_URL=$(cat /tmp/tunnel_url.txt)
-            if [ -n "$PUBLIC_URL" ]; then
-                URL_FOUND=1
-                break
-            fi
-        fi
-        sleep 2
-    done
-    
-    if [ $URL_FOUND -eq 0 ]; then
-        echo "❌ Failed to retrieve Cloudflare Tunnel URL. Check logs:"
-        cat "$TUNNEL_LOG"
-        PUBLIC_URL="Tunnel creation failed. See logs."
-    fi
+    echo "⚡ Spawning Cloudflare Quick Tunnel via 9router"
+    QUICK_TUNNEL_RESPONSE=$(curl -s -X POST "http://127.0.0.1:$PORT/api/tunnel/enable" \
+        -H "Content-Type: application/json" \
+        -d "{\"tunnelUrl\":\"quick://\",\"tunnelProvider\":\"cloudflare\",\"tunnelDashboardAccess\":false}")
+    echo "Quick tunnel enable response: $QUICK_TUNNEL_RESPONSE"
+    sleep 15
 fi
+
+# Step 5: Get tunnel URL status
+echo "⏳ Checking tunnel status..."
+TUNNEL_STATUS=$(curl -s "http://127.0.0.1:$PORT/api/tunnel/status" 2>/dev/null || echo "{}")
+echo "Tunnel status: $TUNNEL_STATUS"
 
 # Step 6: Print Output Summary
 MASTER_KEY="${ROUTER_API_KEY:-sk-9router-secret-key-12345}"
@@ -160,4 +134,4 @@ fi
 
 # Keep workflow alive
 echo "🟢 Server is running. Press Ctrl+C or cancel GitHub workflow to stop."
-wait $ROUTER_PID $TUNNEL_PID
+wait $ROUTER_PID
