@@ -1,0 +1,15 @@
+# Environment files with sensitive API keys
+api_keys.env
+.env
+.env.local
+
+# 9router local databases & logs
+.9router/
+data.sqlite*
+logs/
+*.log
+
+# OS & Node
+node_modules/
+.DS_Store
+Thumbs.db
