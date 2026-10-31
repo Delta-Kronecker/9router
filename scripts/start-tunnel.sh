@@ -5,15 +5,23 @@ echo "=============================================================="
 echo "🚀 Starting 9router & Cloudflare Tunnel setup..."
 echo "=============================================================="
 
-# Environment variables setup
+# Environment variables setup.
+# Secrets from the runner environment always win; a local env file only fills gaps.
 ENV_FILE="${ENV_FILE_PATH:-api_keys.env}"
 PORT="${ROUTER_PORT:-20128}"
 
 if [ -f "$ENV_FILE" ]; then
-    echo "📄 Exporting configuration from $ENV_FILE"
-    set -a
-    source "$ENV_FILE"
-    set +a
+    echo "📄 Filling unset config from $ENV_FILE"
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in *=*) ;; *) continue ;; esac
+        k="${line%%=*}"; v="${line#*=}"
+        k="$(echo "$k" | tr -d '[:space:]')"
+        v="${v%\"}"; v="${v#\"}"
+        [ -z "$k" ] && continue
+        [ -n "${!k}" ] && continue
+        export "$k=$v"
+    done < "$ENV_FILE"
 fi
 
 PORT="${ROUTER_PORT:-20128}"
