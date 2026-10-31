@@ -18,39 +18,47 @@ fi
 
 PORT="${ROUTER_PORT:-20128}"
 
+# 9router stores its SQLite DB under DATA_DIR (default: ~/.9router on Linux,
+# %APPDATA%\9router on Windows). Pin it so the seeder and the server always agree.
+export DATA_DIR="${DATA_DIR:-$HOME/.9router}"
+mkdir -p "$DATA_DIR" /tmp/9router-logs
+APP_LOG="/tmp/9router-logs/app.log"
+
 # Step 1: Seed 9router Database with configured API keys
 echo "🌱 Seeding 9router database..."
 python3 scripts/setup-providers.py
 
-# Step 2: Launch 9router with built-in tunnel support
+# Step 2: Launch 9router (no browser, no auto-update, logs visible)
 echo "📡 Launching 9router service on port $PORT..."
-mkdir -p /tmp/9router-logs
+start_router() {
+    9router -n -l --skip-update -p "$PORT" -H 0.0.0.0 >> "$APP_LOG" 2>&1 &
+    ROUTER_PID=$!
+    echo "9router PID: $ROUTER_PID"
+}
 
-# Start 9router in background
-PORT=$PORT 9router > /tmp/9router-logs/app.log 2>&1 &
-ROUTER_PID=$!
-echo "9router PID: $ROUTER_PID"
-
-# Step 3: Wait for 9router to start
+# Step 3: Wait for the HTTP port to actually answer (first boot compiles Next.js, can take minutes)
 echo "⏳ Waiting for 9router to respond on http://127.0.0.1:$PORT ..."
-MAX_RETRIES=60
-RETRY_COUNT=0
-HEALTH_OK=0
+wait_router() {
+    for i in $(seq 1 ${HEALTH_RETRIES:-90}); do
+        if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/v1/models" 2>/dev/null; then
+            echo "✅ 9router is running and healthy!"
+            return 0
+        fi
+        if ! kill -0 "${ROUTER_PID:-0}" 2>/dev/null; then
+            echo "❌ 9router process exited. Last log lines:"
+            tail -40 "$APP_LOG"
+            return 1
+        fi
+        sleep 2
+    done
+    echo "❌ 9router did not answer within $(( ${HEALTH_RETRIES:-90} * 2 ))s. Last log lines:"
+    tail -40 "$APP_LOG"
+    return 1
+}
 
-while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if curl -s "http://127.0.0.1:$PORT/v1/models" > /dev/null 2>&1; then
-        HEALTH_OK=1
-        break
-    fi
-    sleep 2
-    RETRY_COUNT=$((RETRY_COUNT+1))
-done
-
-if [ $HEALTH_OK -eq 1 ]; then
-    echo "✅ 9router is running and healthy!"
-else
-    echo "⚠️ 9router health check timed out, but continuing..."
-fi
+start_router
+# A dead origin means a dead tunnel: fail loudly instead of publishing a 502 URL.
+wait_router || exit 1
 
 # Step 4: Start Cloudflare Tunnel with cloudflared CLI
 echo "🌐 Starting Cloudflare Tunnel..."
@@ -143,6 +151,26 @@ print(response.choices[0].message.content)
 EOF
 fi
 
-# Keep workflow alive
+# Keep the job alive and the origin healthy. Exits only when cancelled or the
+# router dies more than MAX_RESTARTS times in a row.
 echo "🟢 Server is running. Press Ctrl+C or cancel GitHub workflow to stop."
-wait $ROUTER_PID
+cleanup() {
+    kill "$TUNNEL_PID" "$ROUTER_PID" 2>/dev/null || true
+}
+trap cleanup EXIT TERM INT
+
+MAX_RESTARTS="${MAX_RESTARTS:-5}"
+RESTARTS=0
+while true; do
+    sleep 30
+    if ! kill -0 "$ROUTER_PID" 2>/dev/null; then
+        RESTARTS=$((RESTARTS+1))
+        echo "⚠️ 9router died (restart $RESTARTS/$MAX_RESTARTS). Restarting..."
+        [ "$RESTARTS" -gt "$MAX_RESTARTS" ] && { echo "❌ Giving up after $MAX_RESTARTS restarts."; tail -40 "$APP_LOG"; exit 1; }
+        start_router
+        wait_router || echo "⚠️ Router still not healthy after restart"
+    fi
+    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+        echo "❌ cloudflared exited. Last lines:"; tail -20 "$TUNNEL_LOG"; exit 1
+    fi
+done
