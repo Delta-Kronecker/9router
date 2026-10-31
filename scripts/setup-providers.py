@@ -143,11 +143,16 @@ def seed_database():
             print("[Seeder] Note: PROVIDERS_CONF not set and no providers.conf found.")
 
     # Fall back to individual *_API_KEY secrets, e.g. GEMINI_API_KEY, GEMINI_API_KEY_2, OPENAI_API_KEY...
+    # A single secret may hold several keys, one per line.
     if not conf_source:
-        for env_key, val in os.environ.items():
+        for env_key, val in sorted(os.environ.items()):
             prov = provider_from_env_name(env_key)
-            if prov and val.strip():
-                conf_source += f"{prov}:{val.strip()}\n"
+            if not prov or not val.strip():
+                continue
+            for line in val.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    conf_source += f"{prov}:{line}\n"
 
     configured_count = 0
     seen = {}
