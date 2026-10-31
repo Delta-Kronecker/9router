@@ -47,6 +47,8 @@ jobs:
           ROUTER_PORT: ${{ secrets.ROUTER_PORT || '20128' }}
           ROUTER_API_KEY: ${{ secrets.ROUTER_API_KEY }}
           CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          # Only used with a named tunnel: your Public Hostname, e.g. https://router.example.com
+          PUBLIC_URL: ${{ secrets.PUBLIC_URL }}
 
           # ALL provider keys in ONE secret: multi-line "provider:key" entries
           # Example secret content (PROVIDERS_CONF):

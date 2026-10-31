@@ -52,29 +52,40 @@ else
     echo "⚠️ 9router health check timed out, but continuing..."
 fi
 
-# Step 4: Enable tunnel via 9router internal API
-echo "🌐 Starting Cloudflare Tunnel via 9router..."
+# Step 4: Start Cloudflare Tunnel with cloudflared CLI
+echo "🌐 Starting Cloudflare Tunnel..."
+TUNNEL_LOG="/tmp/9router-logs/cloudflared.log"
 
 if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-    echo "🔑 Using named Cloudflare Tunnel token"
-    TUNNEL_RESPONSE=$(curl -s -X POST "http://127.0.0.1:$PORT/api/tunnel/enable" \
-        -H "Content-Type: application/json" \
-        -d "{\"tunnelUrl\":\"https://tunnel.example.com\",\"tunnelProvider\":\"cloudflare\",\"tunnelDashboardAccess\":false}")
-    echo "Tunnel enable response: $TUNNEL_RESPONSE"
-    sleep 15
-else
-    echo "⚡ Spawning Cloudflare Quick Tunnel via 9router"
-    QUICK_TUNNEL_RESPONSE=$(curl -s -X POST "http://127.0.0.1:$PORT/api/tunnel/enable" \
-        -H "Content-Type: application/json" \
-        -d "{\"tunnelUrl\":\"quick://\",\"tunnelProvider\":\"cloudflare\",\"tunnelDashboardAccess\":false}")
-    echo "Quick tunnel enable response: $QUICK_TUNNEL_RESPONSE"
-    sleep 15
-fi
+    echo "🔑 Using named tunnel token (stable custom domain)"
+    cloudflared tunnel run --token "$CLOUDFLARE_TUNNEL_TOKEN" > "$TUNNEL_LOG" 2>&1 &
+    TUNNEL_PID=$!
 
-# Step 5: Get tunnel URL status
-echo "⏳ Checking tunnel status..."
-TUNNEL_STATUS=$(curl -s "http://127.0.0.1:$PORT/api/tunnel/status" 2>/dev/null || echo "{}")
-echo "Tunnel status: $TUNNEL_STATUS"
+    # Named tunnels get their URL from the Public Hostname route in Cloudflare.
+    PUBLIC_URL="${PUBLIC_URL:-}"
+    if [ -z "$PUBLIC_URL" ]; then
+        echo "⚠️ PUBLIC_URL not set. Set it to your routed hostname, e.g. https://router.example.com"
+        PUBLIC_URL="(set PUBLIC_URL secret to your tunnel hostname)"
+    fi
+else
+    echo "⚡ Spawning quick tunnel (random *.trycloudflare.com URL, changes every run)"
+    cloudflared tunnel --url "http://127.0.0.1:$PORT" --no-autoupdate > "$TUNNEL_LOG" 2>&1 &
+    TUNNEL_PID=$!
+
+    echo "⏳ Waiting for Cloudflare Tunnel URL..."
+    PUBLIC_URL=""
+    for i in $(seq 1 30); do
+        PUBLIC_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$TUNNEL_LOG" | grep -v 'api\.' | tail -n 1 || true)
+        [ -n "$PUBLIC_URL" ] && break
+        sleep 2
+    done
+
+    if [ -z "$PUBLIC_URL" ]; then
+        echo "❌ Failed to retrieve Cloudflare Tunnel URL. Tunnel log:"
+        tail -20 "$TUNNEL_LOG"
+        PUBLIC_URL="(tunnel failed)"
+    fi
+fi
 
 # Step 6: Print Output Summary
 MASTER_KEY="${ROUTER_API_KEY:-sk-9router-secret-key-12345}"
