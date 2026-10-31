@@ -94,44 +94,58 @@ def seed_database():
     
     now_iso = datetime.now(timezone.utc).isoformat()
     
-    # Map of env var -> 9router provider identifier & display name
-    provider_mappings = [
-        ("OPENAI_API_KEY", "openai", "OpenAI"),
-        ("ANTHROPIC_API_KEY", "anthropic", "Anthropic Claude"),
-        ("GEMINI_API_KEY", "gemini", "Google Gemini"),
-        ("DEEPSEEK_API_KEY", "deepseek", "DeepSeek"),
-        ("GROQ_API_KEY", "groq", "Groq"),
-        ("OPENROUTER_API_KEY", "openrouter", "OpenRouter"),
-        ("MISTRAL_API_KEY", "mistral", "Mistral AI"),
-        ("COHERE_API_KEY", "cohere", "Cohere"),
-        ("MOONSHOT_API_KEY", "moonshot", "Moonshot (Kimi)"),
-        ("TOGETHER_API_KEY", "together", "Together AI"),
-        ("XAI_API_KEY", "xai", "xAI (Grok)"),
-        ("QWEN_API_KEY", "qwen", "Alibaba Qwen"),
-    ]
-    
+    # providers.conf format: one "provider:key" per line, multiple keys per provider allowed.
+    # Source: PROVIDERS_CONF env var (GitHub secret) or providers.conf / api_keys.env files.
+    conf_source = os.getenv("PROVIDERS_CONF", "")
+    if not conf_source:
+        for key, val in os.environ.items():
+            if key.startswith("PROVIDERS_CONF_"):
+                conf_source += val + "\n"
+
+    # Fall back to providers.conf file on disk (local testing)
+    if not conf_source:
+        conf_path = os.getenv("PROVIDERS_CONF_PATH", "providers.conf")
+        if os.path.exists(conf_path):
+            print(f"[Seeder] Reading providers from {conf_path}")
+            with open(conf_path, "r", encoding="utf-8") as f:
+                conf_source = f.read()
+        else:
+            print("[Seeder] Note: PROVIDERS_CONF not set and no providers.conf found.")
+
     configured_count = 0
-    for env_var, provider_id, display_name in provider_mappings:
-        api_key = os.getenv(env_var, "").strip()
+    seen = {}
+    for lineno, raw in enumerate(conf_source.splitlines(), 1):
+        entry = raw.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if ":" not in entry:
+            print(f"[Seeder] Warning: skipping malformed line {lineno} (expected provider:key)")
+            continue
+        provider_id, api_key = entry.split(":", 1)
+        provider_id = provider_id.strip().lower()
+        api_key = api_key.strip()
         if not api_key:
             continue
-        
-        conn_id = f"conn-{provider_id}-auto"
+
+        seen[provider_id] = seen.get(provider_id, 0) + 1
+        conn_id = f"conn-{provider_id}-auto-{seen[provider_id]}"
         connection_data = json.dumps({
             "apiKey": api_key,
             "providerSpecificData": {}
         })
-        
+        display_name = f"{provider_id.capitalize()} (auto-{seen[provider_id]})"
+
         cursor.execute("""
         INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             provider=excluded.provider,
             data=excluded.data,
+            isActive=1,
             updatedAt=excluded.updatedAt
-        """, (conn_id, provider_id, "apiKey", display_name, 1, connection_data, now_iso, now_iso))
-        
-        print(f"[Seeder] Registered provider: {display_name} ({provider_id})")
+        """, (conn_id, provider_id, "apiKey", display_name, seen[provider_id], connection_data, now_iso, now_iso))
+
+        print(f"[Seeder] Registered: {provider_id} key #{seen[provider_id]}")
         configured_count += 1
 
     # Master API Key configuration
