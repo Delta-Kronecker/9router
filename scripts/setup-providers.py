@@ -13,6 +13,36 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+ENV_PROVIDER_MAP = {
+    "GEMINI": "gemini",
+    "OPENAI": "openai",
+    "ANTHROPIC": "anthropic",
+    "DEEPSEEK": "deepseek",
+    "GROQ": "groq",
+    "OPENROUTER": "openrouter",
+    "MISTRAL": "mistral",
+    "COHERE": "cohere",
+    "MOONSHOT": "moonshot",
+    "TOGETHER": "together",
+    "XAI": "xai",
+    "QWEN": "qwen",
+    "PERPLEXITY": "perplexity",
+    "OLLAMA": "ollama",
+    "AZURE": "azure",
+    "CEREBRAS": "cerebras",
+}
+
+def provider_from_env_name(env_key):
+    """Map an env var name like GEMINI_API_KEY or GEMINI_API_KEY_2 to a provider id."""
+    name = env_key
+    if name.endswith("_API_KEY"):
+        name = name[: -len("_API_KEY")]
+    elif "_API_KEY_" in name:
+        name = name.split("_API_KEY_", 1)[0]
+    else:
+        return None
+    return ENV_PROVIDER_MAP.get(name.strip().upper())
+
 def load_env_file(filepath):
     """Parses key=value pairs from a file into os.environ if not already set."""
     if not os.path.exists(filepath):
@@ -111,6 +141,13 @@ def seed_database():
                 conf_source = f.read()
         else:
             print("[Seeder] Note: PROVIDERS_CONF not set and no providers.conf found.")
+
+    # Fall back to individual *_API_KEY secrets, e.g. GEMINI_API_KEY, GEMINI_API_KEY_2, OPENAI_API_KEY...
+    if not conf_source:
+        for env_key, val in os.environ.items():
+            prov = provider_from_env_name(env_key)
+            if prov and val.strip():
+                conf_source += f"{prov}:{val.strip()}\n"
 
     configured_count = 0
     seen = {}
